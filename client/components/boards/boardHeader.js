@@ -15,11 +15,25 @@ Template.boardMenuPopup.events({
   }),
 });
 
+Template.boardMenuPopup.helpers({
+  exportUrl() {
+    const boardId = Session.get('currentBoard');
+    const loginToken = Accounts._storedLoginToken();
+    return FlowRouter.url(`api/boards/${boardId}?authToken=${loginToken}`);
+  },
+  exportFilename() {
+    const boardId = Session.get('currentBoard');
+    return `wekan-export-board-${boardId}.json`;
+  },
+});
+
 Template.boardChangeTitlePopup.events({
   submit(evt, tpl) {
     const newTitle = tpl.$('.js-board-name').val().trim();
+    const newDesc = tpl.$('.js-board-desc').val().trim();
     if (newTitle) {
       this.rename(newTitle);
+      this.setDesciption(newDesc);
       Popup.close();
     }
     evt.preventDefault();
@@ -27,14 +41,19 @@ Template.boardChangeTitlePopup.events({
 });
 
 BlazeComponent.extendComponent({
-  template() {
-    return 'headerBoard';
+  watchLevel() {
+    const currentBoard = Boards.findOne(Session.get('currentBoard'));
+    return currentBoard && currentBoard.getWatchLevel(Meteor.userId());
   },
 
   isStarred() {
     const boardId = Session.get('currentBoard');
     const user = Meteor.user();
     return user && user.hasStarred(boardId);
+  },
+
+  isMiniScreen() {
+    return Utils.isMiniScreen();
   },
 
   // Only show the star counter if the number of star is greater than 2
@@ -51,6 +70,7 @@ BlazeComponent.extendComponent({
       },
       'click .js-open-board-menu': Popup.open('boardMenu'),
       'click .js-change-visibility': Popup.open('boardChangeVisibility'),
+      'click .js-watch-board': Popup.open('boardChangeWatch'),
       'click .js-open-filter-view'() {
         Sidebar.setView('filter');
       },
@@ -72,13 +92,9 @@ BlazeComponent.extendComponent({
       },
     }];
   },
-}).register('headerBoard');
+}).register('boardHeaderBar');
 
 BlazeComponent.extendComponent({
-  template() {
-    return 'boardChangeColorPopup';
-  },
-
   backgroundColors() {
     return Boards.simpleSchema()._schema.color.allowedValues;
   },
@@ -101,10 +117,6 @@ BlazeComponent.extendComponent({
 }).register('boardChangeColorPopup');
 
 BlazeComponent.extendComponent({
-  template() {
-    return 'createBoardPopup';
-  },
-
   onCreated() {
     this.visibilityMenuIsOpen = new ReactiveVar(false);
     this.visibility = new ReactiveVar('private');
@@ -145,16 +157,13 @@ BlazeComponent.extendComponent({
         this.setVisibility(this.currentData());
       },
       'click .js-change-visibility': this.toggleVisibilityMenu,
+      'click .js-import': Popup.open('boardImportBoard'),
       submit: this.onSubmit,
     }];
   },
 }).register('createBoardPopup');
 
 BlazeComponent.extendComponent({
-  template() {
-    return 'boardChangeVisibilityPopup';
-  },
-
   visibilityCheck() {
     const currentBoard = Boards.findOne(Session.get('currentBoard'));
     return this.currentData() === currentBoard.permission;
@@ -173,3 +182,25 @@ BlazeComponent.extendComponent({
     }];
   },
 }).register('boardChangeVisibilityPopup');
+
+BlazeComponent.extendComponent({
+  watchLevel() {
+    const currentBoard = Boards.findOne(Session.get('currentBoard'));
+    return currentBoard.getWatchLevel(Meteor.userId());
+  },
+
+  watchCheck() {
+    return this.currentData() === this.watchLevel();
+  },
+
+  events() {
+    return [{
+      'click .js-select-watch'() {
+        const level = this.currentData();
+        Meteor.call('watch', 'board', Session.get('currentBoard'), level, (err, ret) => {
+          if (!err && ret) Popup.close();
+        });
+      },
+    }];
+  },
+}).register('boardChangeWatchPopup');

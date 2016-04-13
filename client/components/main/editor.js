@@ -1,17 +1,15 @@
-let dropdownMenuIsOpened = false;
-
 Template.editor.onRendered(() => {
   const $textarea = this.$('textarea');
 
   autosize($textarea);
 
-  $textarea.textcomplete([
-    // Emojies
+  $textarea.escapeableTextComplete([
+    // Emoji
     {
       match: /\B:([\-+\w]*)$/,
       search(term, callback) {
-        callback($.map(Emoji.values, (emoji) => {
-          return emoji.indexOf(term) === 0 ? emoji : null;
+        callback(Emoji.values.map((emoji) => {
+          return emoji.includes(term) ? emoji : null;
         }));
       },
       template(value) {
@@ -30,9 +28,9 @@ Template.editor.onRendered(() => {
       match: /\B@(\w*)$/,
       search(term, callback) {
         const currentBoard = Boards.findOne(Session.get('currentBoard'));
-        callback($.map(currentBoard.members, (member) => {
+        callback(currentBoard.activeMembers().map((member) => {
           const username = Users.findOne(member.userId).username;
-          return username.indexOf(term) === 0 ? username : null;
+          return username.includes(term) ? username : null;
         }));
       },
       template(value) {
@@ -44,32 +42,10 @@ Template.editor.onRendered(() => {
       index: 1,
     },
   ]);
-
-  // Since commit d474017 jquery-textComplete automatically closes a potential
-  // opened dropdown menu when the user press Escape. This behavior conflicts
-  // with our EscapeActions system, but it's too complicated and hacky to
-  // monkey-pach textComplete to disable it -- I tried. Instead we listen to
-  // 'open' and 'hide' events, and create a ghost escapeAction when the dropdown
-  // is opened (and rely on textComplete to execute the actual action).
-  $textarea.on({
-    'textComplete:show'() {
-      dropdownMenuIsOpened = true;
-    },
-    'textComplete:hide'() {
-      Tracker.afterFlush(() => {
-        dropdownMenuIsOpened = false;
-      });
-    },
-  });
 });
 
-EscapeActions.register('textcomplete',
-  () => {},
-  () => dropdownMenuIsOpened
-);
-
 // XXX I believe we should compute a HTML rendered field on the server that
-// would handle markdown, emojies and user mentions. We can simply have two
+// would handle markdown, emoji and user mentions. We can simply have two
 // fields, one source, and one compiled version (in HTML) and send only the
 // compiled version to most users -- who don't need to edit.
 // In the meantime, all the transformation are done on the client using the
@@ -78,25 +54,27 @@ const at = HTML.CharRef({html: '&commat;', str: '@'});
 Blaze.Template.registerHelper('mentions', new Template('mentions', function() {
   const view = this;
   const currentBoard = Boards.findOne(Session.get('currentBoard'));
-  const knowedUsers = _.map(currentBoard.members, (member) => {
+  const knowedUsers = currentBoard.members.map((member) => {
     member.username = Users.findOne(member.userId).username;
     return member;
   });
   const mentionRegex = /\B@(\w*)/gi;
   let content = Blaze.toHTML(view.templateContentBlock);
 
-  let currentMention, knowedUser, linkClass, linkValue, link;
-  while (Boolean(currentMention = mentionRegex.exec(content))) {
-
-    knowedUser = _.findWhere(knowedUsers, { username: currentMention[1] });
-    if (!knowedUser)
+  let currentMention;
+  while ((currentMention = mentionRegex.exec(content)) !== null) {
+    const [fullMention, username] = currentMention;
+    const knowedUser = _.findWhere(knowedUsers, { username });
+    if (!knowedUser) {
       continue;
+    }
 
-    linkValue = [' ', at, knowedUser.username];
-    linkClass = 'atMention js-open-member';
-    if (knowedUser.userId === Meteor.userId())
+    const linkValue = [' ', at, knowedUser.username];
+    let linkClass = 'atMention js-open-member';
+    if (knowedUser.userId === Meteor.userId()) {
       linkClass += ' me';
-    link = HTML.A({
+    }
+    const link = HTML.A({
       'class': linkClass,
       // XXX Hack. Since we stringify this render function result below with
       // `Blaze.toHTML` we can't rely on blaze data contexts to pass the
@@ -105,7 +83,7 @@ Blaze.Template.registerHelper('mentions', new Template('mentions', function() {
       'data-userId': knowedUser.userId,
     }, linkValue);
 
-    content = content.replace(currentMention[0], Blaze.toHTML(link));
+    content = content.replace(fullMention, Blaze.toHTML(link));
   }
 
   return HTML.Raw(content);

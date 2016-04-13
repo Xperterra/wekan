@@ -71,17 +71,47 @@ Boards.attachSchema(new SimpleSchema({
       'midnight',
     ],
   },
+  description: {
+    type: String,
+    optional: true,
+  },
 }));
 
 
 Boards.helpers({
+  /**
+   * Is supplied user authorized to view this board?
+   */
+  isVisibleBy(user) {
+    if(this.isPublic()) {
+      // public boards are visible to everyone
+      return true;
+    } else {
+      // otherwise you have to be logged-in and active member
+      return user && this.isActiveMember(user._id);
+    }
+  },
+
+  /**
+   * Is the user one of the active members of the board?
+   *
+   * @param userId
+   * @returns {boolean} the member that matches, or undefined/false
+   */
+  isActiveMember(userId) {
+    if(userId) {
+      return this.members.find((member) => (member.userId === userId && member.isActive));
+    } else {
+      return false;
+    }
+  },
+
   isPublic() {
     return this.permission === 'public';
   },
 
   lists() {
-    return Lists.find({ boardId: this._id, archived: false },
-                                                          { sort: { sort: 1 }});
+    return Lists.find({ boardId: this._id, archived: false }, { sort: { sort: 1 }});
   },
 
   activities() {
@@ -92,20 +122,48 @@ Boards.helpers({
     return _.where(this.members, {isActive: true});
   },
 
+  activeAdmins() {
+    return _.where(this.members, {isActive: true, isAdmin: true});
+  },
+
+  memberUsers() {
+    return Users.find({ _id: {$in: _.pluck(this.members, 'userId')} });
+  },
+
+  getLabel(name, color) {
+    return _.findWhere(this.labels, { name, color });
+  },
+
   labelIndex(labelId) {
-    return _.indexOf(_.pluck(this.labels, '_id'), labelId);
+    return _.pluck(this.labels, '_id').indexOf(labelId);
   },
 
   memberIndex(memberId) {
-    return _.indexOf(_.pluck(this.members, 'userId'), memberId);
+    return _.pluck(this.members, 'userId').indexOf(memberId);
+  },
+
+  hasMember(memberId) {
+    return !!_.findWhere(this.members, {userId: memberId, isActive: true});
+  },
+
+  hasAdmin(memberId) {
+    return !!_.findWhere(this.members, {userId: memberId, isActive: true, isAdmin: true});
   },
 
   absoluteUrl() {
-    return FlowRouter.path('board', { id: this._id, slug: this.slug });
+    return FlowRouter.url('board', { id: this._id, slug: this.slug });
   },
 
   colorClass() {
     return `board-color-${this.color}`;
+  },
+
+  // XXX currently mutations return no value so we have an issue when using addLabel in import
+  // XXX waiting on https://github.com/mquandalle/meteor-collection-mutations/issues/1 to remove...
+  pushLabel(name, color) {
+    const _id = Random.id(6);
+    Boards.direct.update(this._id, { $push: {labels: { _id, name, color }}});
+    return _id;
   },
 });
 
@@ -122,6 +180,10 @@ Boards.mutations({
     return { $set: { title }};
   },
 
+  setDesciption(description) {
+    return { $set: {description} };
+  },
+
   setColor(color) {
     return { $set: { color }};
   },
@@ -131,18 +193,28 @@ Boards.mutations({
   },
 
   addLabel(name, color) {
-    const _id = Random.id(6);
-    return { $push: {labels: { _id, name, color }}};
+    // If label with the same name and color already exists we don't want to
+    // create another one because they would be indistinguishable in the UI
+    // (they would still have different `_id` but that is not exposed to the
+    // user).
+    if (!this.getLabel(name, color)) {
+      const _id = Random.id(6);
+      return { $push: {labels: { _id, name, color }}};
+    }
+    return {};
   },
 
   editLabel(labelId, name, color) {
-    const labelIndex = this.labelIndex(labelId);
-    return {
-      $set: {
-        [`labels.${labelIndex}.name`]: name,
-        [`labels.${labelIndex}.color`]: color,
-      },
-    };
+    if (!this.getLabel(name, color)) {
+      const labelIndex = this.labelIndex(labelId);
+      return {
+        $set: {
+          [`labels.${labelIndex}.name`]: name,
+          [`labels.${labelIndex}.color`]: color,
+        },
+      };
+    }
+    return {};
   },
 
   removeLabel(labelId) {
@@ -151,38 +223,53 @@ Boards.mutations({
 
   addMember(memberId) {
     const memberIndex = this.memberIndex(memberId);
-    if (memberIndex === -1) {
-      return {
-        $push: {
-          members: {
-            userId: memberId,
-            isAdmin: false,
-            isActive: true,
-          },
-        },
-      };
-    } else {
+    if (memberIndex >= 0) {
       return {
         $set: {
           [`members.${memberIndex}.isActive`]: true,
-          [`members.${memberIndex}.isAdmin`]: false,
         },
       };
     }
+
+    return {
+      $push: {
+        members: {
+          userId: memberId,
+          isAdmin: false,
+          isActive: true,
+        },
+      },
+    };
   },
 
   removeMember(memberId) {
     const memberIndex = this.memberIndex(memberId);
 
+    // we do not allow the only one admin to be removed
+    const allowRemove = (!this.members[memberIndex].isAdmin) || (this.activeAdmins().length > 1);
+    if (!allowRemove) {
+      return {
+        $set: {
+          [`members.${memberIndex}.isActive`]: true,
+        },
+      };
+    }
+
     return {
       $set: {
         [`members.${memberIndex}.isActive`]: false,
+        [`members.${memberIndex}.isAdmin`]: false,
       },
     };
   },
 
   setMemberPermission(memberId, isAdmin) {
     const memberIndex = this.memberIndex(memberId);
+
+    // do not allow change permission of self
+    if (memberId === Meteor.userId()) {
+      isAdmin = this.members[memberIndex].isAdmin;
+    }
 
     return {
       $set: {
@@ -220,9 +307,7 @@ if (Meteor.isServer) {
         return false;
 
       // If there is more than one admin, it's ok to remove anyone
-      const nbAdmins = _.filter(doc.members, (member) => {
-        return member.isAdmin;
-      }).length;
+      const nbAdmins = _.where(doc.members, {isActive: true, isAdmin: true}).length;
       if (nbAdmins > 1)
         return false;
 
@@ -235,6 +320,21 @@ if (Meteor.isServer) {
       }));
     },
     fetch: ['members'],
+  });
+
+  Meteor.methods({
+    quitBoard(boardId) {
+      check(boardId, String);
+      const board = Boards.findOne(boardId);
+      if (board) {
+        const userId = Meteor.userId();
+        const index = board.memberIndex(userId);
+        if (index>=0) {
+          board.removeMember(userId);
+          return true;
+        } else throw new Meteor.Error('error-board-notAMember');
+      } else throw new Meteor.Error('error-board-doesNotExist');
+    },
   });
 }
 
@@ -259,7 +359,7 @@ Boards.before.insert((userId, doc) => {
   // Handle labels
   const colors = Boards.simpleSchema()._schema['labels.$.color'].allowedValues;
   const defaultLabelsColors = _.clone(colors).splice(0, 6);
-  doc.labels = _.map(defaultLabelsColors, (color) => {
+  doc.labels = defaultLabelsColors.map((color) => {
     return {
       color,
       _id: Random.id(6),
@@ -299,15 +399,16 @@ if (Meteor.isServer) {
     if (!_.contains(fieldNames, 'labels') ||
       !modifier.$pull ||
       !modifier.$pull.labels ||
-      !modifier.$pull.labels._id)
+      !modifier.$pull.labels._id) {
       return;
+    }
 
     const removedLabelId = modifier.$pull.labels._id;
     Cards.update(
       { boardId: doc._id },
       {
         $pull: {
-          labels: removedLabelId,
+          labelIds: removedLabelId,
         },
       },
       { multi: true }
@@ -316,8 +417,9 @@ if (Meteor.isServer) {
 
   // Add a new activity if we add or remove a member to the board
   Boards.after.update((userId, doc, fieldNames, modifier) => {
-    if (!_.contains(fieldNames, 'members'))
+    if (!_.contains(fieldNames, 'members')) {
       return;
+    }
 
     let memberId;
 
